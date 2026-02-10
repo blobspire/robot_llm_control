@@ -1,10 +1,11 @@
+from datetime import datetime
+from operator import concat
 import pybullet as p
 import pybullet_data
 import numpy as np
 import os
 import time
 from robot import Panda
-import math
 
 import ollama
 
@@ -27,8 +28,6 @@ table = p.loadURDF(os.path.join(urdfRootPath, "table/table.urdf"), basePosition=
 # Randomize cube position to ensure genuine reasoning
 cube1 = p.loadURDF(os.path.join(urdfRootPath, "cube_small.urdf"), basePosition=[0.6 + np.random.uniform(-0.05, 0.05), -0.2 + np.random.uniform(-0.05, 0.05), 0.05])
 cube2 = p.loadURDF(os.path.join(urdfRootPath, "cube_small.urdf"), basePosition=[0.4 + np.random.uniform(-0.05, 0.05), -0.3 + np.random.uniform(-0.05, 0.05), 0.05])
-
-# p.quaternionFromEuler([0, 0, 0]) # Uses quaternion by default. Can convert from Euler angle since easier
 
 # load the robot
 jointStartPositions = [0.0, 0.0, 0.0, -2*np.pi/4, 0.0, np.pi/2, np.pi/4, 0.0, 0.0, 0.04, 0.04]
@@ -90,40 +89,64 @@ def describe_state() -> str:
     ee = s["ee-position"]
     return (
         f"End-Effector Position: ({ee[0]:.4f}, {ee[1]:.4f}, {ee[2]:.4f}); "
-        f"Gripper State: {s['gripper_state']}."
+        f"Gripper State: {s['gripper-state']}; Gripper Width: {s['gripper-width']:.4f}; {state_description}"
     )
 
 def describe_env() -> str:
     cube1_pos, _ = p.getBasePositionAndOrientation(cube1)
     cube2_pos, _ = p.getBasePositionAndOrientation(cube2)
     return (
-        f"Cube1 Position: ({cube1_pos[0]:.4f}, {cube1_pos[1]:.4f}, {cube1_pos[2]:.4f}); "
-        f"Cube2 Position: ({cube2_pos[0]:.4f}, {cube2_pos[1]:.4f}, {cube2_pos[2]:.4f}); "
-        f"Cube size: 0.05m."
+        f"The center of Cube1 is at position: ({cube1_pos[0]:.4f}, {cube1_pos[1]:.4f}, {cube1_pos[2]:.4f}); "
+        f"The center of Cube2 is at position: ({cube2_pos[0]:.4f}, {cube2_pos[1]:.4f}, {cube2_pos[2]:.4f}); "
+        f"{env_description}"
     )
 
+state_description = "" # Not needed yet
+env_description = "Cube dimensions: 0.05m x 0.05m x 0.05m."
+final_instruction_line = "Now, analyze the latest environment and robot states and determine if the task has been completed within a reasonable margin of error. If you think the task has been completed, call done(). If you think that the task is not complete yet, execute the best next move towards completing the task using the tools."
 
-# System prompt for tool use; generated via Chat
-SYSTEM = """
-You control a Panda robot arm with a gripper in simulation by calling tools.
-
-You MUST act by calling tools. Do not output plans, JSON, or explanations.
-- If you need multiple steps, call multiple tools.
+# System prompt for tool use
+# Concat the following chunks together to enable final_instruction_line insertion without picking up the ToolCall braces
+SYSTEM = ""
+SYSTEM_1 = f"""
+You control a simulation Panda robot arm with a gripper by calling the available tools.
+You were given a task by the user. You have since executed a series of actions. Check if you have completed the user's task within a reasonable margin of error. If you think the task has been completed based on the current state of the robot and environment, call done(). If you think that the task is not complete yet, execute the best next move towards completing the task using the tools.
 
 Available tools:
-- move_to_pose(x, y, z, rotz)
-- open_gripper()
-- close_gripper()
-- done()
+- move_to_pose(x, y, z, rotz): move the end-effector to a Cartesian pose
+- open_gripper(): open the robot gripper
+- close_gripper(): close the robot gripper
+- done(): indicate task completion
 
-To place a cube on top of another, you should move the first cube at least 10cm above the second cube before lowering it down.
+Ensure a margin of safety to avoid unintended collisions. Grab the center of the block to maximize grasp success. 
+Consider that when you move to pose, the parameters that you provide are the executed location of the end-effector. Therefore, the offset between the end-effector location and the cube center location must be considered to avoid attempting to move the cube into the space of another cube.
 
-Use rotz=0.0 unless the user explicitly requests otherwise.
-
-When the task is complete, call done() exactly once and stop.
+<Start of example>
+State: End-Effector Position: (0.5545, 0.0002, 0.5195); Gripper State: open; Gripper Width: 0.0800; {state_description}
+Env: The center of Cube1 is at position: (0.6268, -0.2203, 0.0250); The center of Cube2 is at position: (0.4229, -0.3189, 0.0250); {env_description}
+Task: pick up cube1
+{final_instruction_line}
 """
+SYSTEM_2 = """
+content: ''
+tool_calls: ToolCall(function=Function(name='move_to_pose', arguments={'x': 0.6268, 'y': -0.2203, 'z': 0.025, 'rotz': 0}))
+<End of example>
+"""
+SYSTEM = concat(SYSTEM_1, SYSTEM_2)
 
-MODEL = "qwen3:8b"
+# Including few shot examples for picking up cubes and stacking cubes drastically improves success rate but defeats some of the purpose of the LLM reasoning.
+# ToolCall(function=Function(name='move_to_pose', arguments={'x': 0.4312, 'y': -0.3368, 'z': 0.075, 'rotz': 0})), ToolCall(function=Function(name='open_gripper', arguments={})), ToolCall(function=Function(name='done', arguments={}))
+# After picking up a cube, you should raise it at least 10cm above the table before moving to another location because each cube is 5cm tall and you want to avoid unwanted collisions.
+# Therefore, the difference between the end-effector position and each of the cube sides at grasp-time must be considered to avoid attempting to move the cube into the space of another cube.
+
+### 
+# A potentially beneficial prompt technique could be somthing like:
+# You were given the task XYZ. You have executed a series of action. Check if you completed the task. If so, call done(). If not, execute the best next move towards completing the task using the tools.
+#
+# Though right now, it has succesfully terminated after stacking two blocks. This prompt is just likely a bit more robust.
+###
+
+MODEL = "gpt-oss:20b"
 
 # let the scene initialize
 for i in range (200):
@@ -133,71 +156,107 @@ for i in range (200):
 terminate = False
 
 while not terminate: # Execute commands for robot
-    user_command = input("Enter your command for the robot (or 'exit' to quit): ")
-    if user_command.lower() == 'exit':
+    now = datetime.now()
+    print(f"\n=== {now} ===")
+    user_task = input("Enter your task for the robot (or 'exit' to exit): ")
+    if user_task.lower() == 'exit':
         terminate = True
         break
 
-    state = panda.get_state()
-
     messages = [
         {"role": "system", "content": SYSTEM},
-        {"role": "user", "content": f"Observations:\nState: {describe_state()}\nEnv: {describe_env()}\nCommand: {user_command}"}
+        {"role": "user", "content": f"Observations:\nState: {describe_state()}\nEnv: {describe_env()}\nTask: {user_task}\n{final_instruction_line}"}
     ]
 
-    response = ollama.chat(
-        model=MODEL,
-        messages=messages,
-        tools=[move_to_pose, open_gripper, close_gripper, done],
-        options={
-            "temperature": 0.0,
-        },
-        keep_alive="30m",
-    )
+    MAX_STEPS = 20
+    for step in range(MAX_STEPS):
+        response = ollama.chat(
+            model=MODEL,
+            messages=messages,
+            tools=[move_to_pose, open_gripper, close_gripper, done],
+            options={
+                "temperature": 0.0,
+            },
+            keep_alive="30m",
+        )
 
-    # print("Thinking:", getattr(response.message, "thinking", None))
-    # print("Content :", repr(getattr(response.message, "content", None)))
-    # print("Tool calls:", getattr(response.message, "tool_calls", None))
+        content = (getattr(response.message, "content", "") or "").strip()
+        tool_calls = getattr(response.message, "tool_calls", None) or []
 
-    messages.append(response.message)
+        print("Thinking:", getattr(response.message, "thinking", None))
+        print("Content :", repr(content))
+        print("Tool calls:", tool_calls, "\n")
 
-    tool_calls = getattr(response.message, "tool_calls", None) or []
-    if not tool_calls:
-        # Done (model chose not to call tools further)
-        break
+        messages.append(response.message)
 
-    for call in tool_calls:
-        fn_name = call.function.name
-        fn_args = call.function.arguments or {}
-        fn = available_functions.get(fn_name)
-
-        if fn is None:
+        # If model does not call tools but does provide content, remind of tool use and force retry. It often details the plan but doesn't call tools. 
+        if not tool_calls:
             messages.append({
-                "role": "tool",
-                "tool_name": fn_name,
-                "content": f"ERROR: unknown tool {fn_name}",
+                "role": "system",
+                "content": (
+                    "Invalid response. You must call tools to control the robot and complete the task. If the task is complete, call done()."
+                )
+            })
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"Task: {user_task}\n"
+                    f"State: {describe_state()}\n"
+                    f"Env: {describe_env()}\n"
+                    "Retry the best next move using the tools now.\n"
+                )
             })
             continue
 
-        try:
-            result = fn(**fn_args)
-        except Exception as e:
-            result = f"ERROR executing {fn_name}({fn_args}): {e}"
+        stop_chain = False
 
-        messages.append({
-            "role": "tool",
-            "tool_name": fn_name,
-            "content": str(result),
-        })
+        for call in tool_calls:
+            fn_name = call.function.name
+            fn_args = call.function.arguments or {}
+            fn = available_functions.get(fn_name)
+
+            if fn is None:
+                messages.append({
+                    "role": "tool",
+                    "tool_name": fn_name,
+                    "content": f"ERROR: unknown tool {fn_name}",
+                })
+                continue
+            
+            if fn_name == "done":
+                stop_chain = True
+                messages.append({
+                "role": "tool",
+                "tool_name": "done",
+                "content": "ok",
+                })
+                break
+
+            try:
+                result = fn(**fn_args)
+            except Exception as e:
+                result = f"ERROR executing {fn_name}({fn_args}): {e}"
+
+            messages.append({
+                "role": "tool",
+                "tool_name": fn_name,
+                "content": str(result),
+            })
+
+        if stop_chain:
+            break
 
         messages.append({
         "role": "user",
         "content": "Updated observations:\n"
                 f"State: {describe_state()}\n"
-                f"Env: {describe_env()}"
+                f"Env: {describe_env()}\n"
+                f"Task: {user_task}\n"
+                f"{final_instruction_line}"
         })
 
 
+# Notes from class:
 
 # Control robot with LLM commands via Ollama
 # Ignore joints 8 and 9
@@ -207,3 +266,14 @@ while not terminate: # Execute commands for robot
 
 # LLM should have access to state of arm and ball. It should be given command from user and append the state
 # Have some code here that can call robot functions
+
+# p.quaternionFromEuler([0, 0, 0]) # Uses quaternion by default. Can convert from Euler angle since easier
+
+# TODO gpt oss is zooming. This will allow me to run more complex reasoning. I should switch the command to be an "original command" so that the model knows I issued it at first rather than after the 10th command. This will likely help it from not restarting the task when it has
+# accomplished it. Also, add reasoning to "examine if further actions are required. does the current state accomplish the user's command? if so, your job is done so call done()." 
+# also, add some extra reasoning for unintended collisions. i could instruct to lift to certain height but if i add more cubes / other objects, it needs to be dynamic.
+
+# How do they determine if a task is done?
+
+# TODO likely include description of env / size / what the model needs to internpret the state, directly with the state. Otherwise, might forget since way at beginning.
+# TODO look at messages thread and see if the prompt location / subsequent makes sense or if it's causing the model to think it's a new task, causing the interference / start over.

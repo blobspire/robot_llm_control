@@ -42,15 +42,15 @@ class Panda():
         state["ee-position"] = ee_values[4]
         state["ee-quaternion"] = ee_values[5]
         state["ee-euler"] = p.getEulerFromQuaternion(state["ee-quaternion"])
+        state["gripper-width"] = gripper_width
 
         # Gripper state
         if gripper_width > 0.06:
-            state["gripper_state"] = "open"
+            state["gripper-state"] = "open"
         elif gripper_width < 0.02:
-            state["gripper_state"] = "closed"
+            state["gripper-state"] = "closed"
         else:
-            state["gripper_state"] = "partially open"
-
+            state["gripper-state"] = "grasping"
         return state
 
     # close the robot's gripper
