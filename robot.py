@@ -50,7 +50,7 @@ class Panda():
         elif gripper_width < 0.02:
             state["gripper-state"] = "closed"
         else:
-            state["gripper-state"] = "partially open"
+            state["gripper-state"] = "grasping"
         return state
 
     # close the robot's gripper
