@@ -1,4 +1,5 @@
 from datetime import datetime
+from operator import concat
 import pybullet as p
 import pybullet_data
 import numpy as np
@@ -88,22 +89,28 @@ def describe_state() -> str:
     ee = s["ee-position"]
     return (
         f"End-Effector Position: ({ee[0]:.4f}, {ee[1]:.4f}, {ee[2]:.4f}); "
-        f"Gripper State: {s['gripper-state']}. Gripper Width: {s['gripper-width']:.4f}."
+        f"Gripper State: {s['gripper-state']}; Gripper Width: {s['gripper-width']:.4f}; {state_description}"
     )
 
 def describe_env() -> str:
     cube1_pos, _ = p.getBasePositionAndOrientation(cube1)
     cube2_pos, _ = p.getBasePositionAndOrientation(cube2)
     return (
-        f"Cube1 Position: ({cube1_pos[0]:.4f}, {cube1_pos[1]:.4f}, {cube1_pos[2]:.4f}); "
-        f"Cube2 Position: ({cube2_pos[0]:.4f}, {cube2_pos[1]:.4f}, {cube2_pos[2]:.4f}); "
-        f"The cube positions are the center of the cubes. Cube dimensions: 0.05m x 0.05m x 0.05m."
+        f"The center of Cube1 is at position: ({cube1_pos[0]:.4f}, {cube1_pos[1]:.4f}, {cube1_pos[2]:.4f}); "
+        f"The center of Cube2 is at position: ({cube2_pos[0]:.4f}, {cube2_pos[1]:.4f}, {cube2_pos[2]:.4f}); "
+        f"{env_description}"
     )
 
+state_description = "" # Not needed yet
+env_description = "Cube dimensions: 0.05m x 0.05m x 0.05m."
+final_instruction_line = "Now, analyze the latest environment and robot states and determine if the task has been completed within a reasonable margin of error. If you think the task has been completed, call done(). If you think that the task is not complete yet, execute the best next move towards completing the task using the tools."
 
 # System prompt for tool use
-SYSTEM = """
-You control a simulation Panda robot arm with a gripper by calling tools. You want to accomplish the user's command by calling the available tools to control the robot arm and gripper. Your task is to execute the best next move based on the current state.
+# Concat the following chunks together to enable final_instruction_line insertion without picking up the ToolCall braces
+SYSTEM = ""
+SYSTEM_1 = f"""
+You control a simulation Panda robot arm with a gripper by calling the available tools.
+You were given a task by the user. You have since executed a series of actions. Check if you have completed the user's task within a reasonable margin of error. If you think the task has been completed based on the current state of the robot and environment, call done(). If you think that the task is not complete yet, execute the best next move towards completing the task using the tools.
 
 Available tools:
 - move_to_pose(x, y, z, rotz): move the end-effector to a Cartesian pose
@@ -111,23 +118,33 @@ Available tools:
 - close_gripper(): close the robot gripper
 - done(): indicate task completion
 
-
-
-You MUST call tools to control the robot. Do not output text. When the task is complete, call done().
+Ensure a margin of safety to avoid unintended collisions. Grab the center of the block to maximize grasp success. 
+Consider that when you move to pose, the parameters that you provide are the executed location of the end-effector. Therefore, the offset between the end-effector location and the cube center location must be considered to avoid attempting to move the cube into the space of another cube.
 
 <Start of example>
-State: End-Effector Position: (0.5545, 0.0002, 0.5195); Gripper State: open. Gripper Width: 0.0800.
-Env: Cube1 Position: (0.6268, -0.2203, 0.0250); Cube2 Position: (0.4229, -0.3189, 0.0250); The cube positions are the center of the cubes. Cube dimensions: 0.05m x 0.05m x 0.05m.
-Command: pick up cube1
-Now complete the best next move towards completing the task using the tools.
-
+State: End-Effector Position: (0.5545, 0.0002, 0.5195); Gripper State: open; Gripper Width: 0.0800; {state_description}
+Env: The center of Cube1 is at position: (0.6268, -0.2203, 0.0250); The center of Cube2 is at position: (0.4229, -0.3189, 0.0250); {env_description}
+Task: pick up cube1
+{final_instruction_line}
+"""
+SYSTEM_2 = """
 content: ''
 tool_calls: ToolCall(function=Function(name='move_to_pose', arguments={'x': 0.6268, 'y': -0.2203, 'z': 0.025, 'rotz': 0}))
 <End of example>
 """
+SYSTEM = concat(SYSTEM_1, SYSTEM_2)
+
 # Including few shot examples for picking up cubes and stacking cubes drastically improves success rate but defeats some of the purpose of the LLM reasoning.
 # ToolCall(function=Function(name='move_to_pose', arguments={'x': 0.4312, 'y': -0.3368, 'z': 0.075, 'rotz': 0})), ToolCall(function=Function(name='open_gripper', arguments={})), ToolCall(function=Function(name='done', arguments={}))
 # After picking up a cube, you should raise it at least 10cm above the table before moving to another location because each cube is 5cm tall and you want to avoid unwanted collisions.
+# Therefore, the difference between the end-effector position and each of the cube sides at grasp-time must be considered to avoid attempting to move the cube into the space of another cube.
+
+### 
+# A potentially beneficial prompt technique could be somthing like:
+# You were given the task XYZ. You have executed a series of action. Check if you completed the task. If so, call done(). If not, execute the best next move towards completing the task using the tools.
+#
+# Though right now, it has succesfully terminated after stacking two blocks. This prompt is just likely a bit more robust.
+###
 
 MODEL = "gpt-oss:20b"
 
@@ -141,14 +158,14 @@ terminate = False
 while not terminate: # Execute commands for robot
     now = datetime.now()
     print(f"\n=== {now} ===")
-    user_command = input("Enter your command for the robot (or 'exit' to quit): ")
-    if user_command.lower() == 'exit':
+    user_task = input("Enter your task for the robot (or 'exit' to exit): ")
+    if user_task.lower() == 'exit':
         terminate = True
         break
 
     messages = [
         {"role": "system", "content": SYSTEM},
-        {"role": "user", "content": f"Observations:\nState: {describe_state()}\nEnv: {describe_env()}\nCommand: {user_command}\nNow complete the best next move towards completing the task using the tools."}
+        {"role": "user", "content": f"Observations:\nState: {describe_state()}\nEnv: {describe_env()}\nTask: {user_task}\n{final_instruction_line}"}
     ]
 
     MAX_STEPS = 20
@@ -168,7 +185,7 @@ while not terminate: # Execute commands for robot
 
         print("Thinking:", getattr(response.message, "thinking", None))
         print("Content :", repr(content))
-        print("Tool calls:", tool_calls)
+        print("Tool calls:", tool_calls, "\n")
 
         messages.append(response.message)
 
@@ -183,7 +200,7 @@ while not terminate: # Execute commands for robot
             messages.append({
                 "role": "user",
                 "content": (
-                    f"Command: {user_command}\n"
+                    f"Task: {user_task}\n"
                     f"State: {describe_state()}\n"
                     f"Env: {describe_env()}\n"
                     "Retry the best next move using the tools now.\n"
@@ -233,7 +250,9 @@ while not terminate: # Execute commands for robot
         "role": "user",
         "content": "Updated observations:\n"
                 f"State: {describe_state()}\n"
-                f"Env: {describe_env()}"
+                f"Env: {describe_env()}\n"
+                f"Task: {user_task}\n"
+                f"{final_instruction_line}"
         })
 
 
@@ -250,6 +269,11 @@ while not terminate: # Execute commands for robot
 
 # p.quaternionFromEuler([0, 0, 0]) # Uses quaternion by default. Can convert from Euler angle since easier
 
-# TODO is the failure to use tools due to context size or model size? It's succeeded once. Another time, it used tools correctly after retry. Maybe the retry prompt frames the tool use better -- particularly saying tool use for task AFTER state and env.
-# TODO watch video / actual site on how to use llm tools -- LOOK at ollama documentation
-# TODO I could also run on rlogin GPU cluster and maybe pipe video back to my laptop. This would model small local model and then big smart model in cloud. Realistic since latency won't impact quality of movement.
+# TODO gpt oss is zooming. This will allow me to run more complex reasoning. I should switch the command to be an "original command" so that the model knows I issued it at first rather than after the 10th command. This will likely help it from not restarting the task when it has
+# accomplished it. Also, add reasoning to "examine if further actions are required. does the current state accomplish the user's command? if so, your job is done so call done()." 
+# also, add some extra reasoning for unintended collisions. i could instruct to lift to certain height but if i add more cubes / other objects, it needs to be dynamic.
+
+# How do they determine if a task is done?
+
+# TODO likely include description of env / size / what the model needs to internpret the state, directly with the state. Otherwise, might forget since way at beginning.
+# TODO look at messages thread and see if the prompt location / subsequent makes sense or if it's causing the model to think it's a new task, causing the interference / start over.
