@@ -234,4 +234,4 @@ ollama pull gpt-oss:20b
 ```
 
 ## Future Work
-The next major milestone is transitioning from known cube coordinates to vision. This adds considerable complexity but will better represent real-world applications.
+The next major milestone will be transitioning from known cube coordinates to vision. This will add considerable complexity but will better represent real-world applications.
