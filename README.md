@@ -35,9 +35,9 @@ move above cube1
 
 ```text
 .
-├── main.py      # Simulation setup, LLM loop, tool definitions, user prompt loop
-├── robot.py     # Panda robot wrapper around PyBullet controls and state access
-├── test.py      # Ollama tool-calling test to confirm your Ollama is properly set up
+├── main.py             # Simulation setup, LLM loop, tool definitions, user prompt loop
+├── robot.py            # Panda robot wrapper around PyBullet controls and state access
+├── test_ollama.py      # Ollama tool-calling test to confirm your Ollama is properly set up
 └── README.md
 ```
 
@@ -80,7 +80,7 @@ ollama pull gpt-oss:20b
 You can verify that Ollama tool calling is working with:
 
 ```bash
-python test.py
+python test_ollama.py
 ```
 
 ## Running the Robot Controller
