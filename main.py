@@ -9,10 +9,10 @@ from robot import Panda
 
 import ollama
 
-# parameters
+# Parameters
 control_dt = 1. / 240.
 
-# create simulation and place camera
+# Create simulation and place camera
 physicsClient = p.connect(p.GUI)
 p.setGravity(0, 0, -9.81)
 p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
@@ -21,7 +21,7 @@ p.resetDebugVisualizerCamera(cameraDistance=1.0,
                                 cameraPitch=-30.0, 
                                 cameraTargetPosition=[0.5, 0.0, 0.2])
 
-# load the objects
+# Load the objects
 urdfRootPath = pybullet_data.getDataPath()
 plane = p.loadURDF(os.path.join(urdfRootPath, "plane.urdf"), basePosition=[0, 0, -0.625])
 table = p.loadURDF(os.path.join(urdfRootPath, "table/table.urdf"), basePosition=[0.5, 0, -0.625])
@@ -29,7 +29,7 @@ table = p.loadURDF(os.path.join(urdfRootPath, "table/table.urdf"), basePosition=
 cube1 = p.loadURDF(os.path.join(urdfRootPath, "cube_small.urdf"), basePosition=[0.6 + np.random.uniform(-0.05, 0.05), -0.2 + np.random.uniform(-0.05, 0.05), 0.05])
 cube2 = p.loadURDF(os.path.join(urdfRootPath, "cube_small.urdf"), basePosition=[0.4 + np.random.uniform(-0.05, 0.05), -0.3 + np.random.uniform(-0.05, 0.05), 0.05])
 
-# load the robot
+# Load the robot
 jointStartPositions = [0.0, 0.0, 0.0, -2*np.pi/4, 0.0, np.pi/2, np.pi/4, 0.0, 0.0, 0.04, 0.04]
 panda = Panda(basePosition=[0, 0, 0],
                 baseOrientation=p.getQuaternionFromEuler([0, 0, 0]),
@@ -264,16 +264,11 @@ while not terminate: # Execute commands for robot
 # Revolute = radians and prismatic = meters
 # We're using this Panda robot this year
 
-# LLM should have access to state of arm and ball. It should be given command from user and append the state
-# Have some code here that can call robot functions
+# My notes:
 
-# p.quaternionFromEuler([0, 0, 0]) # Uses quaternion by default. Can convert from Euler angle since easier
-
-# TODO gpt oss is zooming. This will allow me to run more complex reasoning. I should switch the command to be an "original command" so that the model knows I issued it at first rather than after the 10th command. This will likely help it from not restarting the task when it has
+# TODO I should switch the command to be an "original command" so that the model knows I issued it at first rather than after the 10th command. This will likely help it from not restarting the task when it has
 # accomplished it. Also, add reasoning to "examine if further actions are required. does the current state accomplish the user's command? if so, your job is done so call done()." 
-# also, add some extra reasoning for unintended collisions. i could instruct to lift to certain height but if i add more cubes / other objects, it needs to be dynamic.
-
-# How do they determine if a task is done?
+# Also, add some extra reasoning for unintended collisions. I could instruct to lift to certain height but if I add more cubes / other objects, it will need to be dynamic.
 
 # TODO likely include description of env / size / what the model needs to internpret the state, directly with the state. Otherwise, might forget since way at beginning.
 # TODO look at messages thread and see if the prompt location / subsequent makes sense or if it's causing the model to think it's a new task, causing the interference / start over.
