@@ -1,69 +1,237 @@
-# HRI: Homework 0
+# LLM-Controlled Robot Arm
 
-Dylan Losey, Virginia Tech.
+This project controls a simulated Franka Panda robot arm with a local large
+language model. The user gives the robot a task in natural language, the
+program observes the current robot and environment state, and the LLM chooses
+the next robot action by calling tools. The loop repeats until the model decides
+the task is complete.
 
-In this homework assignment we will simulate a robot arm.
+The simulation runs in PyBullet and uses Ollama for local LLM inference.
 
-## Install and Run
+## What It Does
 
-### Ubuntu
+- Opens a PyBullet simulation with a Panda robot arm, a table, and two small
+  cubes.
+- Randomizes the cube positions slightly at startup so the model must reason
+  from the current environment instead of memorizing fixed coordinates.
+- Sends the robot state, environment state, and user task to a local LLM.
+- Exposes robot-control functions as tools the LLM can call directly.
+- Executes the selected tool call in simulation, updates the observations, and
+  asks the model for the next action.
+- Stops when the model calls `done()`, or after a maximum number of tool-use
+  steps.
+
+Example tasks:
+
+```text
+pick up cube1
+move cube2 to the right of cube1
+stack cube1 on cube2
+open the gripper
+move above cube1
+```
+
+## Project Structure
+
+```text
+.
+├── main.py      # Simulation setup, LLM loop, tool definitions, user prompt loop
+├── robot.py     # Panda robot wrapper around PyBullet controls and state access
+├── test.py      # Ollama tool-calling test to confirm your Ollama is properly set up
+└── README.md
+```
+
+## Requirements
+
+- Python 3.10 or newer
+- PyBullet
+- NumPy
+- Ollama
+- A local Ollama model that supports tool calling
+
+Currently, the best performing model is gpt-oss 20b. To try another model, change `MODEL` in `main.py`.
+
+```python
+MODEL = "gpt-oss:20b"
+```
+
+## Setup
+
+Create and activate a virtual environment:
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
 
-# Download
-git clone https://github.com/vt-hri/HW0.git
-cd HW0
+Install the Python dependencies:
 
-# Create and source virtual environment
-python3 -m venv venv
-source venv/bin/activate
+```bash
+pip install pybullet numpy ollama
+```
 
-# Install dependencies
-pip install numpy pybullet
+Install and start Ollama if it is not already running, then pull the model used
+by the program:
 
-# Run the script
+```bash
+ollama pull gpt-oss:20b
+```
+
+You can verify that Ollama tool calling is working with:
+
+```bash
+python test.py
+```
+
+## Running the Robot Controller
+
+Start the simulator and interactive command loop:
+
+```bash
 python main.py
 ```
 
-### Windows
+A PyBullet GUI window should open with the Panda arm, table, and cubes. In the
+terminal, enter a task for the robot:
 
-One way to run this is with WSL, [Windows Subsystem for Linux](https://learn.microsoft.com/en-us/windows/wsl/install).
-
-1. Install WSL. Windows provides instructions [here](https://learn.microsoft.com/en-us/windows/wsl/setup/environment). I also recommend this [tutorial](https://www.youtube.com/watch?v=-Wg2r1lWrTc). Once installed, make sure to update and upgrade packages using:
-```bash
-
-sudo apt update && sudo apt upgrade
-sudo apt install python3-pip python3-venv
-
+```text
+Enter your task for the robot (or 'exit' to exit): stack cube1 on cube2
 ```
 
-2. Open an Ubuntu terminal. Right click, and paste the code shown above in the [Ubuntu](#ubuntu) section. After the packages are installed, you should see the [Expected Output](#expected-output).
+For each task, the program sends the latest observations to the model and prints
+the model's response, including any tool calls. The robot then executes those
+tool calls in simulation.
 
-3. Install a text editing software. I use [Sublime](https://www.sublimetext.com/download), but there are many good options. You will use this text editing software to write your code.
+Type `exit` at the prompt to close the command loop.
 
-### Mac
+## Control Loop
 
-You can use [Anaconda](https://www.anaconda.com/). Follow the instructions [here](https://www.anaconda.com/download/success). Once installed, make sure conda is setup correctly by running 
-```bash
-conda
+The core loop in `main.py` works like this:
+
+1. Read a natural-language task from the user.
+2. Build an observation containing:
+   - End-effector position
+   - Gripper state and width
+   - Cube positions
+   - Cube dimensions
+3. Ask the local LLM to choose the best next action.
+4. Require the model to call one of the available tools.
+5. Execute the tool in PyBullet.
+6. Append the tool result to the conversation.
+7. Send updated observations back to the model.
+8. Repeat until the model calls `done()` or reaches `MAX_STEPS`.
+
+## Available Tools
+
+The LLM can control the robot with these tools:
+
+### `move_to_pose(x, y, z, rotz)`
+
+Moves the end-effector to a Cartesian pose in world coordinates.
+
+- `x`: target x position in meters
+- `y`: target y position in meters
+- `z`: target z position in meters
+- `rotz`: end-effector rotation about the z axis in radians
+
+The prompt tells the model to use `rotz = 0.0` for a downward-facing gripper.
+
+### `open_gripper()`
+
+Opens the gripper fingers.
+
+### `close_gripper()`
+
+Closes the gripper fingers.
+
+### `done(reason="")`
+
+Signals that the task is complete.
+
+## Simulation Details
+
+The scene contains:
+
+- A ground plane
+- A table
+- A fixed-base Franka Panda robot arm
+- Two small cubes loaded from PyBullet's built-in URDF assets
+
+Each cube is approximately:
+
+```text
+0.05 m x 0.05 m x 0.05 m
 ```
 
-You might have to source the .bash (or .zsh) file depending on which bash script the terminal uses. Or, simply close and re-open the terminal.
+The cube centers are read from PyBullet at every step and included in the model
+prompt. This allows the model to adapt to randomized cube positions.
 
-```bash
-# Create a new conda env with python version 3.10.
-conda create -n venv python=3.10
+## Prompting Strategy
 
-# Install pybullet from conda
-conda install pybullet
+The system prompt tells the model that it controls the robot through tools and
+must decide whether the user task is complete. If the task is not complete, the
+model should call the best next tool.
 
-# You can use pip to install all the other packages.
-pip install numpy
+The prompt also includes an example tool call to ensure that the model has the proper tool-calling syntax.
 
-# Run the script
-python main.py
+If the model returns text without a tool call, the program appends a corrective
+message and retries:
+
+```text
+Invalid response. You must call tools to control the robot and complete the task.
+If the task is complete, call done().
 ```
 
-## Expected Output
+## Important Parameters
 
-<img src="env.gif" width="750">
+In `main.py`:
+
+```python
+control_dt = 1. / 240.
+MAX_STEPS = 20
+MODEL = "gpt-oss:20b"
+```
+
+- `control_dt` controls the simulation step timing.
+- `MAX_STEPS` limits how many model/tool iterations a single user task can run.
+- `MODEL` selects the Ollama model.
+
+The movement and gripper tools currently execute fixed numbers of simulation
+steps:
+
+```python
+move_to_pose: 800 steps
+open_gripper: 300 steps
+close_gripper: 300 steps
+```
+
+## Troubleshooting
+
+### PyBullet GUI does not open
+
+Make sure you are running the program in an environment with GUI access. The
+program connects with:
+
+```python
+p.connect(p.GUI)
+```
+
+Headless environments may need to use `p.DIRECT` instead, but that will remove
+the interactive visualization.
+
+### Ollama connection errors
+
+Confirm that Ollama is installed and running:
+
+```bash
+ollama list
+```
+
+Then confirm the configured model exists locally:
+
+```bash
+ollama pull gpt-oss:20b
+```
+
+## Future Work
+The next major milestone is transitioning from known cube coordinates to vision. This adds considerable complexity but will better represent real-world applications.
