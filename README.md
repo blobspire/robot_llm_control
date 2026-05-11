@@ -188,7 +188,7 @@ In `main.py`:
 
 ```python
 control_dt = 1. / 240.
-MAX_STEPS = 20
+MAX_STEPS = 30
 MODEL = "gpt-oss:20b"
 ```
 
@@ -216,8 +216,8 @@ program connects with:
 p.connect(p.GUI)
 ```
 
-Headless environments may need to use `p.DIRECT` instead, but that will remove
-the interactive visualization.
+Headless environments can use `p.DIRECT` instead as this removes
+the visualization.
 
 ### Ollama connection errors
 
