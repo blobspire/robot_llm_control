@@ -168,7 +168,7 @@ while not terminate: # Execute commands for robot
         {"role": "user", "content": f"Observations:\nState: {describe_state()}\nEnv: {describe_env()}\nTask: {user_task}\n{final_instruction_line}"}
     ]
 
-    MAX_STEPS = 0
+    MAX_STEPS = 30
     for step in range(MAX_STEPS):
         response = ollama.chat(
             model=MODEL,
