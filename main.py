@@ -119,17 +119,17 @@ Available tools:
 - done(): indicate task completion
 
 Ensure a margin of safety to avoid unintended collisions. Grab the center of the block to maximize grasp success. 
-Consider that when you move to pose, the parameters that you provide are the executed location of the end-effector. Therefore, the offset between the end-effector location and the cube center location must be considered to avoid attempting to move the cube into the space of another cube.
+Consider that when you move to pose, the parameters that you provide are the executed location of the end-effector. Therefore, the offset between the end-effector location and the cube center location, and the cube dimensions, must be considered to avoid attempting to move the cube into the space of another cube.
 
 <Start of example>
 State: End-Effector Position: (0.5545, 0.0002, 0.5195); Gripper State: open; Gripper Width: 0.0800; {state_description}
 Env: The center of Cube1 is at position: (0.6268, -0.2203, 0.0250); The center of Cube2 is at position: (0.4229, -0.3189, 0.0250); {env_description}
-Task: pick up cube1
+Task: Move the end effector to (0.1, 0.2, 0.3)
 {final_instruction_line}
 """
 SYSTEM_2 = """
 content: ''
-tool_calls: ToolCall(function=Function(name='move_to_pose', arguments={'x': 0.6268, 'y': -0.2203, 'z': 0.025, 'rotz': 0}))
+tool_calls: ToolCall(function=Function(name='move_to_pose', arguments={'x': 0.1, 'y': 0.2, 'z': 0.3, 'rotz': 0}))
 <End of example>
 """
 SYSTEM = concat(SYSTEM_1, SYSTEM_2)
@@ -168,7 +168,7 @@ while not terminate: # Execute commands for robot
         {"role": "user", "content": f"Observations:\nState: {describe_state()}\nEnv: {describe_env()}\nTask: {user_task}\n{final_instruction_line}"}
     ]
 
-    MAX_STEPS = 20
+    MAX_STEPS = 0
     for step in range(MAX_STEPS):
         response = ollama.chat(
             model=MODEL,
