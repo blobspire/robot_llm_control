@@ -8,6 +8,12 @@ import os
 # here is the link to the urdf files used for the panda:
 # https://github.com/bulletphysics/bullet3/tree/master/examples/pybullet/gym/pybullet_data/franka_panda
 class Panda():
+    ARM_JOINT_INDICES = tuple(range(9))
+    FINGER_JOINT_INDICES = (9, 10)
+    LEFT_FINGER_LINK_INDEX = 9
+    RIGHT_FINGER_LINK_INDEX = 10
+    FINGER_LINK_INDICES = (LEFT_FINGER_LINK_INDEX, RIGHT_FINGER_LINK_INDEX)
+    GRASP_TARGET_LINK_INDEX = 11
 
     # the urdf for the panda robot has 11 joints
     # the first seven joints correspond to the joints of the robot arm, and the last two are for the gripper fingers
@@ -29,7 +35,7 @@ class Panda():
     # get the robot's joint state and end-effector state
     def get_state(self): # Returns a dictionary, ie state["joint-position"], state["ee-position"], etc.
         joint_values = p.getJointStates(self.panda, range(11))
-        ee_values = p.getLinkState(self.panda, 11)
+        ee_values = p.getLinkState(self.panda, self.GRASP_TARGET_LINK_INDEX)
 
         finger_left = joint_values[9][0]
         finger_right = joint_values[10][0]
@@ -58,14 +64,14 @@ class Panda():
     # can tune the controller with "positionGains" as inputs to setJointMotorControlArray
     def close_gripper(self):
         positionGains = [0.01] * 2
-        p.setJointMotorControlArray(self.panda, [9,10], p.POSITION_CONTROL, targetPositions=[0.0, 0.0], positionGains=positionGains)
+        p.setJointMotorControlArray(self.panda, self.FINGER_JOINT_INDICES, p.POSITION_CONTROL, targetPositions=[0.0, 0.0], positionGains=positionGains)
 
     # open the robot's gripper
     # moves the fingers to positions [0.04, 0.04]
     # can tune the controller with "positionGains" as inputs to setJointMotorControlArray
     def open_gripper(self):
         positionGains = [0.01] * 2
-        p.setJointMotorControlArray(self.panda, [9,10], p.POSITION_CONTROL, targetPositions=[0.04, 0.04], positionGains=positionGains)
+        p.setJointMotorControlArray(self.panda, self.FINGER_JOINT_INDICES, p.POSITION_CONTROL, targetPositions=[0.04, 0.04], positionGains=positionGains)
 
     # inverse kinematics (IK) of the panda robot
     # computes the joint angles that makes the end-effector reach a given target position in Cartesian world space
@@ -73,9 +79,9 @@ class Panda():
     # if ee_quaterion is set as None (i.e., not specified), pure position IK will be used
     def inverse_kinematics(self, ee_position, ee_quaternion):
         if ee_quaternion is None:
-            return p.calculateInverseKinematics(self.panda, 11, list(ee_position))
+            return p.calculateInverseKinematics(self.panda, self.GRASP_TARGET_LINK_INDEX, list(ee_position))
         else:
-            return p.calculateInverseKinematics(self.panda, 11, list(ee_position), list(ee_quaternion))
+            return p.calculateInverseKinematics(self.panda, self.GRASP_TARGET_LINK_INDEX, list(ee_position), list(ee_quaternion))
 
     # move the robot to a desired position
     # computes the joint angles needed to make the end-effector reach a given target position in Cartesian world space
@@ -86,4 +92,4 @@ class Panda():
         if ee_rotz is not None:
             ee_quaternion = p.getQuaternionFromEuler([np.pi, 0, ee_rotz])
         targetPositions = self.inverse_kinematics(ee_position, ee_quaternion)
-        p.setJointMotorControlArray(self.panda, range(9), p.POSITION_CONTROL, targetPositions=targetPositions, positionGains=[positionGain]*9)
+        p.setJointMotorControlArray(self.panda, self.ARM_JOINT_INDICES, p.POSITION_CONTROL, targetPositions=targetPositions, positionGains=[positionGain]*9)

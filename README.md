@@ -14,10 +14,12 @@ The simulation runs in PyBullet and uses Ollama for local LLM inference.
   cubes.
 - Randomizes the cube positions slightly at startup so the model must reason
   from the current environment instead of memorizing fixed coordinates.
-- Sends the robot state, environment state, and user task to a local LLM.
-- Exposes robot-control functions as tools the LLM can call directly.
-- Executes the selected tool call in simulation, updates the observations, and
-  asks the model for the next action.
+- Sends a structured world state, contact summary, relation predicates, and user
+  task to a local LLM.
+- Exposes generic robot-control and manipulation tools to the LLM. These are
+  reusable primitives, not task-specific shortcuts.
+- Executes the selected tool call in simulation, verifies the observed outcome,
+  reports object deltas and contacts, and asks the model for the next action.
 - Stops when the model calls `done()`, or after a maximum number of tool-use
   steps.
 
@@ -36,8 +38,12 @@ move above cube1
 ```text
 .
 ├── main.py             # Simulation setup, LLM loop, tool definitions, user prompt loop
+├── controller.py       # Generic robot tools, safeguards, and action verification
+├── world_model.py      # Structured world state, contacts, object deltas, relations
+├── benchmark.py        # Optional LLM benchmark runner with JSONL transcripts
 ├── robot.py            # Panda robot wrapper around PyBullet controls and state access
 ├── test_ollama.py      # Ollama tool-calling test to confirm your Ollama is properly set up
+├── tests/              # Headless PyBullet tests for grasp/place/world-model behavior
 └── README.md
 ```
 
@@ -106,24 +112,23 @@ Type `exit` at the prompt to close the command loop.
 
 ## Control Loop
 
-The core loop in `main.py` works like this:
+The core loop in `main.py` now follows a planner/executor/critic pattern:
 
 1. Read a natural-language task from the user.
-2. Build an observation containing:
-   - End-effector position
-   - Gripper state and width
-   - Cube positions
-   - Cube dimensions
-3. Ask the local LLM to choose the best next action.
-4. Require the model to call one of the available tools.
-5. Execute the tool in PyBullet.
-6. Append the tool result to the conversation.
-7. Send updated observations back to the model.
-8. Repeat until the model calls `done()` or reaches `MAX_STEPS`.
+2. Build a structured world state containing robot state, object geometry,
+   contacts, held-object estimate, relation predicates, and the last action
+   result.
+3. Ask the local LLM to choose the best next generic action.
+4. Execute the tool in PyBullet with workspace and low-transfer safeguards.
+5. Report the verified outcome, including object deltas, contacts, warnings, and
+   whether a held object was actually detected.
+6. Send updated observations back to the model.
+7. Repeat until `done(reason)` is accepted by the predicate checker or
+   `MAX_STEPS` is reached.
 
 ## Available Tools
 
-The LLM can control the robot with these tools:
+The LLM can control the robot with these generic tools:
 
 ### `move_to_pose(x, y, z, rotz)`
 
@@ -136,6 +141,16 @@ Moves the end-effector to a Cartesian pose in world coordinates.
 
 The prompt tells the model to use `rotz = 0.0` for a downward-facing gripper.
 
+### `move_relative(dx, dy, dz, drotz=0.0)`
+
+Moves the end-effector by a relative offset from the current pose.
+
+### `move_to_object_pose(object_name, dx, dy, dz, rotz=0.0)`
+
+Moves the end-effector to a pose expressed as an offset from an object's center.
+This keeps the LLM's geometric reasoning explicit while reducing arithmetic
+errors.
+
 ### `open_gripper()`
 
 Opens the gripper fingers.
@@ -144,9 +159,61 @@ Opens the gripper fingers.
 
 Closes the gripper fingers.
 
+The returned action result reports whether a held object was verified. Gripper
+width alone is not treated as proof that a grasp succeeded.
+
+### `wait_until_settled()`
+
+Advances the simulation until objects are stable, then returns the latest world
+state.
+
+### `observe()`
+
+Returns the latest structured world state without moving the robot.
+
+### `approach_object(object_name, clearance=0.08)`
+
+Moves above an object's center using a generic clearance above the object's top
+surface.
+
+### `grasp_object(object_name, grasp_axis="y")`
+
+Runs a generic manipulation primitive: approach, descend to the object's center
+height, close, lift, and verify that the object moved with the gripper.
+
+This is not a task-specific shortcut. The LLM still decides which object to
+grasp and what task-level relation it is trying to achieve.
+
+### `place_object_at_pose(x, y, z, rotz=0.0)`
+
+Places the currently held object at a desired object-center pose, releases it,
+waits for physics to settle, and verifies the result.
+
 ### `done(reason="")`
 
-Signals that the task is complete.
+Requests task completion. The controller accepts this only when inferred
+predicate checks for known tabletop relations pass. For example, `stack cube1 on
+cube2` requires the observed `on(cube1, cube2)` relation to be true.
+
+The project intentionally does **not** expose task-specific tools such as
+`stack_cubes()` or hard-coded stack examples.
+
+## World Model
+
+The LLM receives structured observations with:
+
+- Object center pose, size, velocity, `top_z`, `bottom_z`, and stability.
+- End-effector pose, gripper width, and a note that finger width is not proof of
+  holding an object.
+- Robot/object contacts, including whether contact is on a gripper finger.
+- Estimated `held_object`, based on contact plus object pose relative to the
+  grasp target.
+- Relation predicates including `held`, `stable`, `near`, `touching`, `above`,
+  `on`, and `right_of`.
+- Last action result with success/failure, warnings, and per-object pose deltas.
+
+`right_of(a, b)` uses the positive world x axis: object `a` must have a larger
+x coordinate than object `b` by a safe margin.
 
 ## Simulation Details
 
@@ -168,41 +235,69 @@ prompt. This allows the model to adapt to randomized cube positions.
 
 ## Prompting Strategy
 
-The system prompt tells the model that it controls the robot through tools and
-must decide whether the user task is complete. If the task is not complete, the
-model should call the best next tool.
+The system prompt tells the model that it controls the robot through generic
+tools and must act as both planner and critic. It emphasizes:
 
-The prompt also includes an example tool call to ensure that the model has the proper tool-calling syntax.
+- Trust observed state over intended actions.
+- Recover after failed grasps instead of assuming success.
+- Use object geometry and relation predicates for task completion.
+- Treat `place_object_at_pose` targets as held-object center poses.
 
 If the model returns text without a tool call, the program appends a corrective
 message and retries:
 
 ```text
-Invalid response. You must call tools to control the robot and complete the task.
-If the task is complete, call done().
+Invalid response. You must call one generic tool. If the task is complete,
+call done(reason).
 ```
+
+## Tests and Benchmarks
+
+Run the headless PyBullet tests:
+
+```bash
+python -m unittest tests.test_controller
+```
+
+These tests verify object geometry, relation predicates, failed high grasps,
+held-object estimation, generic grasping, and generic placement.
+
+Run optional LLM benchmarks and save JSONL transcripts:
+
+```bash
+python benchmark.py --runs 20
+```
+
+Add `--gui` to watch benchmark runs in PyBullet. The benchmark tasks include
+pick-up, relative movement, stacking, near-but-not-touching, and return-to-start
+style tasks.
 
 ## Important Parameters
 
-In `main.py`:
+In `main.py` and `controller.py`:
 
 ```python
-control_dt = 1. / 240.
 MAX_STEPS = 30
 MODEL = "gpt-oss:20b"
+CONTROL_DT = 1. / 240.
+WORKSPACE_BOUNDS = {"x": (0.20, 0.85), "y": (-0.60, 0.35), "z": (0.015, 0.65)}
 ```
 
-- `control_dt` controls the simulation step timing.
 - `MAX_STEPS` limits how many model/tool iterations a single user task can run.
 - `MODEL` selects the Ollama model.
+- `CONTROL_DT` controls the simulation step timing.
+- `WORKSPACE_BOUNDS` rejects unsafe or unreachable poses before execution.
 
-The movement and gripper tools currently execute fixed numbers of simulation
-steps:
+The low-level movement and gripper commands still execute fixed simulation
+steps internally. The generic skills combine these low-level movements with
+verification:
 
 ```python
 move_to_pose: 800 steps
 open_gripper: 300 steps
-close_gripper: 300 steps
+close_gripper: 400 steps
+grasp_object: approach + descend + close + lift + verify
+place_object_at_pose: lift + transfer + lower + release + settle + verify
 ```
 
 ## Troubleshooting

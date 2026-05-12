@@ -1,274 +1,385 @@
+from __future__ import annotations
+
 from datetime import datetime
-from operator import concat
-import pybullet as p
-import pybullet_data
-import numpy as np
-import os
-import time
-from robot import Panda
+import json
+from typing import Any
 
 import ollama
 
-# Parameters
-control_dt = 1. / 240.
+from controller import SimulationController
 
-# Create simulation and place camera
-physicsClient = p.connect(p.GUI)
-p.setGravity(0, 0, -9.81)
-p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
-p.resetDebugVisualizerCamera(cameraDistance=1.0, 
-                                cameraYaw=40.0,
-                                cameraPitch=-30.0, 
-                                cameraTargetPosition=[0.5, 0.0, 0.2])
-
-# Load the objects
-urdfRootPath = pybullet_data.getDataPath()
-plane = p.loadURDF(os.path.join(urdfRootPath, "plane.urdf"), basePosition=[0, 0, -0.625])
-table = p.loadURDF(os.path.join(urdfRootPath, "table/table.urdf"), basePosition=[0.5, 0, -0.625])
-# Randomize cube position to ensure genuine reasoning
-cube1 = p.loadURDF(os.path.join(urdfRootPath, "cube_small.urdf"), basePosition=[0.6 + np.random.uniform(-0.05, 0.05), -0.2 + np.random.uniform(-0.05, 0.05), 0.05])
-cube2 = p.loadURDF(os.path.join(urdfRootPath, "cube_small.urdf"), basePosition=[0.4 + np.random.uniform(-0.05, 0.05), -0.3 + np.random.uniform(-0.05, 0.05), 0.05])
-
-# Load the robot
-jointStartPositions = [0.0, 0.0, 0.0, -2*np.pi/4, 0.0, np.pi/2, np.pi/4, 0.0, 0.0, 0.04, 0.04]
-panda = Panda(basePosition=[0, 0, 0],
-                baseOrientation=p.getQuaternionFromEuler([0, 0, 0]),
-                jointStartPositions=jointStartPositions)
-
-# Tool configuration
-def move_to_pose(x: float, y: float, z: float, rotz: float) -> str:
-    """
-    Move robot end-effector to a Cartesian pose.
-
-    Args:
-        x: target x (meters)
-        y: target y (meters)
-        z: target z (meters)
-        rotz: target rotation about z (radians). Use 0.0 for gripper facing down.
-    Returns:
-        A short status string.
-    """
-
-    # Could clamp bounds for safety
-
-    for _ in range(800):
-        panda.move_to_pose(ee_position=[x, y, z], ee_rotz=rotz, positionGain=0.01)
-        p.stepSimulation()
-        time.sleep(control_dt)
-
-    return f"moved_to_pose({x:.3f}, {y:.3f}, {z:.3f}, {rotz:.3f})"
-
-def open_gripper() -> str:
-    """Open the robot gripper."""
-    for _ in range(300):
-        panda.open_gripper()
-        p.stepSimulation()
-        time.sleep(control_dt)
-    return "gripper_opened"
-
-def close_gripper() -> str:
-    """Close the robot gripper."""
-    for _ in range(300):
-        panda.close_gripper()
-        p.stepSimulation()
-        time.sleep(control_dt)
-    return "gripper_closed"
-
-def done(reason: str = "") -> str:
-    return f"done: {reason}"
-
-available_functions = {
-    "move_to_pose": move_to_pose,
-    "open_gripper": open_gripper,
-    "close_gripper": close_gripper,
-    "done": done
-}
-
-def describe_state() -> str:
-    s = panda.get_state()
-    ee = s["ee-position"]
-    return (
-        f"End-Effector Position: ({ee[0]:.4f}, {ee[1]:.4f}, {ee[2]:.4f}); "
-        f"Gripper State: {s['gripper-state']}; Gripper Width: {s['gripper-width']:.4f}; {state_description}"
-    )
-
-def describe_env() -> str:
-    cube1_pos, _ = p.getBasePositionAndOrientation(cube1)
-    cube2_pos, _ = p.getBasePositionAndOrientation(cube2)
-    return (
-        f"The center of Cube1 is at position: ({cube1_pos[0]:.4f}, {cube1_pos[1]:.4f}, {cube1_pos[2]:.4f}); "
-        f"The center of Cube2 is at position: ({cube2_pos[0]:.4f}, {cube2_pos[1]:.4f}, {cube2_pos[2]:.4f}); "
-        f"{env_description}"
-    )
-
-state_description = "" # Not needed yet
-env_description = "Cube dimensions: 0.05m x 0.05m x 0.05m."
-final_instruction_line = "Now, analyze the latest environment and robot states and determine if the task has been completed within a reasonable margin of error. If you think the task has been completed, call done(). If you think that the task is not complete yet, execute the best next move towards completing the task using the tools."
-
-# System prompt for tool use
-# Concat the following chunks together to enable final_instruction_line insertion without picking up the ToolCall braces
-SYSTEM = ""
-SYSTEM_1 = f"""
-You control a simulation Panda robot arm with a gripper by calling the available tools.
-You were given a task by the user. You have since executed a series of actions. Check if you have completed the user's task within a reasonable margin of error. If you think the task has been completed based on the current state of the robot and environment, call done(). If you think that the task is not complete yet, execute the best next move towards completing the task using the tools.
-
-Available tools:
-- move_to_pose(x, y, z, rotz): move the end-effector to a Cartesian pose
-- open_gripper(): open the robot gripper
-- close_gripper(): close the robot gripper
-- done(): indicate task completion
-
-Ensure a margin of safety to avoid unintended collisions. Grab the center of the block to maximize grasp success. 
-Consider that when you move to pose, the parameters that you provide are the executed location of the end-effector. Therefore, the offset between the end-effector location and the cube center location, and the cube dimensions, must be considered to avoid attempting to move the cube into the space of another cube.
-
-<Start of example>
-State: End-Effector Position: (0.5545, 0.0002, 0.5195); Gripper State: open; Gripper Width: 0.0800; {state_description}
-Env: The center of Cube1 is at position: (0.6268, -0.2203, 0.0250); The center of Cube2 is at position: (0.4229, -0.3189, 0.0250); {env_description}
-Task: Move the end effector to (0.1, 0.2, 0.3)
-{final_instruction_line}
-"""
-SYSTEM_2 = """
-content: ''
-tool_calls: ToolCall(function=Function(name='move_to_pose', arguments={'x': 0.1, 'y': 0.2, 'z': 0.3, 'rotz': 0}))
-<End of example>
-"""
-SYSTEM = concat(SYSTEM_1, SYSTEM_2)
-
-# Including few shot examples for picking up cubes and stacking cubes drastically improves success rate but defeats some of the purpose of the LLM reasoning.
-# ToolCall(function=Function(name='move_to_pose', arguments={'x': 0.4312, 'y': -0.3368, 'z': 0.075, 'rotz': 0})), ToolCall(function=Function(name='open_gripper', arguments={})), ToolCall(function=Function(name='done', arguments={}))
-# After picking up a cube, you should raise it at least 10cm above the table before moving to another location because each cube is 5cm tall and you want to avoid unwanted collisions.
-# Therefore, the difference between the end-effector position and each of the cube sides at grasp-time must be considered to avoid attempting to move the cube into the space of another cube.
-
-### 
-# A potentially beneficial prompt technique could be somthing like:
-# You were given the task XYZ. You have executed a series of action. Check if you completed the task. If so, call done(). If not, execute the best next move towards completing the task using the tools.
-#
-# Though right now, it has succesfully terminated after stacking two blocks. This prompt is just likely a bit more robust.
-###
 
 MODEL = "gpt-oss:20b"
+MAX_STEPS = 30
+MODEL_RETRY_LIMIT = 3
 
-# let the scene initialize
-for i in range (200):
-    p.stepSimulation()
-    time.sleep(control_dt)
+active_controller: SimulationController | None = None
+active_user_task = ""
 
-terminate = False
 
-while not terminate: # Execute commands for robot
-    now = datetime.now()
-    print(f"\n=== {now} ===")
-    user_task = input("Enter your task for the robot (or 'exit' to exit): ")
-    if user_task.lower() == 'exit':
-        terminate = True
-        break
+def _controller() -> SimulationController:
+    if active_controller is None:
+        raise RuntimeError("Simulation controller is not initialized.")
+    return active_controller
 
-    messages = [
-        {"role": "system", "content": SYSTEM},
-        {"role": "user", "content": f"Observations:\nState: {describe_state()}\nEnv: {describe_env()}\nTask: {user_task}\n{final_instruction_line}"}
-    ]
 
-    MAX_STEPS = 30
-    for step in range(MAX_STEPS):
-        response = ollama.chat(
-            model=MODEL,
-            messages=messages,
-            tools=[move_to_pose, open_gripper, close_gripper, done],
-            options={
-                "temperature": 0.0,
-            },
-            keep_alive="30m",
+def move_to_pose(x: float, y: float, z: float, rotz: float) -> str:
+    """
+    Move the robot grasp target to a Cartesian world pose.
+
+    Args:
+        x: target x position in meters.
+        y: target y position in meters.
+        z: target z position in meters.
+        rotz: end-effector rotation about world z in radians. Use 0.0 as the default downward grasp orientation.
+    """
+    return _controller().move_to_pose(x, y, z, rotz)
+
+
+def move_relative(dx: float, dy: float, dz: float, drotz: float = 0.0) -> str:
+    """
+    Move the robot grasp target by a relative offset from its current pose.
+
+    Args:
+        dx: relative x motion in meters.
+        dy: relative y motion in meters.
+        dz: relative z motion in meters.
+        drotz: relative rotation about world z in radians.
+    """
+    return _controller().move_relative(dx, dy, dz, drotz)
+
+
+def move_to_object_pose(object_name: str, dx: float, dy: float, dz: float, rotz: float = 0.0) -> str:
+    """
+    Move the grasp target to an object-relative pose.
+
+    Args:
+        object_name: name of the reference object, such as cube1 or cube2.
+        dx: target x offset from the object's center in meters.
+        dy: target y offset from the object's center in meters.
+        dz: target z offset from the object's center in meters.
+        rotz: end-effector rotation about world z in radians.
+    """
+    return _controller().move_to_object_pose(object_name, dx, dy, dz, rotz)
+
+
+def open_gripper() -> str:
+    """Open the robot gripper and report the measured outcome."""
+    return _controller().open_gripper()
+
+
+def close_gripper() -> str:
+    """Close the robot gripper and report contacts, width, and verified held object."""
+    return _controller().close_gripper()
+
+
+def wait_until_settled() -> str:
+    """Advance physics until scene objects are stable, then return the structured world state."""
+    return _controller().wait_until_settled()
+
+
+def observe() -> str:
+    """Return the latest structured robot, object, contact, and relation state."""
+    return _controller().observe()
+
+
+def approach_object(object_name: str, clearance: float = 0.08) -> str:
+    """
+    Move above an object's center using a generic clearance.
+
+    Args:
+        object_name: name of the target object.
+        clearance: vertical distance above the object's top surface in meters.
+    """
+    return _controller().approach_object(object_name, clearance)
+
+
+def grasp_object(object_name: str, grasp_axis: str = "y") -> str:
+    """
+    Perform a generic object grasp: approach, descend to the object center height, close, lift, and verify.
+
+    Args:
+        object_name: name of the object to grasp.
+        grasp_axis: gripper closing axis, "y" by default or "x" for a 90 degree rotated grasp.
+    """
+    return _controller().grasp_object(object_name, grasp_axis)
+
+
+def place_object_at_pose(x: float, y: float, z: float, rotz: float = 0.0) -> str:
+    """
+    Place the currently held object at a target object-center pose.
+
+    Args:
+        x: desired held-object center x position in meters.
+        y: desired held-object center y position in meters.
+        z: desired held-object center z position in meters.
+        rotz: end-effector rotation about world z in radians.
+    """
+    return _controller().place_object_at_pose(x, y, z, rotz)
+
+
+def done(reason: str = "") -> str:
+    """
+    Request task completion. The controller accepts this only when inferred task predicates are satisfied.
+
+    Args:
+        reason: short explanation of why the observed world state satisfies the user's task.
+    """
+    return _controller().done(active_user_task, reason)
+
+
+TOOLS = [
+    move_to_pose,
+    move_relative,
+    move_to_object_pose,
+    open_gripper,
+    close_gripper,
+    wait_until_settled,
+    observe,
+    approach_object,
+    grasp_object,
+    place_object_at_pose,
+    done,
+]
+
+AVAILABLE_FUNCTIONS = {tool.__name__: tool for tool in TOOLS}
+
+FINAL_INSTRUCTION_LINE = (
+    "Analyze the latest structured world state and decide whether the task is complete. "
+    "If the task is complete, call done(reason). If not, call exactly the best next generic tool."
+)
+
+SYSTEM = """
+You control a simulated Franka Panda robot arm with a gripper through generic tools.
+Your role is planner and critic: choose useful actions, then update your beliefs from the observed outcome.
+
+Core invariant:
+- Never assume an action succeeded because it was commanded.
+- Trust the latest world state, object deltas, contacts, held_object, and relation predicates over your prior plan.
+- Gripper width is only finger opening; it is not proof of holding an object.
+- If a grasp fails, recover: observe, open, reposition lower/centered, retry with a different generic action, or choose another safe approach.
+
+Geometry facts:
+- end_effector_position is the Panda grasp target between the fingers, in world coordinates.
+- Object pose is the object center. Each object also reports size, top_z, and bottom_z.
+- Spatial relation convention: right_of(a, b) means object a has a larger world x coordinate than object b by a safe margin.
+- For a side grasp, approach above the object, then put the grasp target near the object center height before closing.
+- place_object_at_pose(x, y, z) treats x/y/z as the desired center pose of the currently held object.
+- Use object top_z + held_object half height when you want an object resting on top of another object.
+
+Available generic tools:
+- move_to_pose(x, y, z, rotz): precise Cartesian movement.
+- move_relative(dx, dy, dz, drotz): small local corrections.
+- move_to_object_pose(object_name, dx, dy, dz, rotz): object-relative movement.
+- open_gripper(): open fingers and report outcome.
+- close_gripper(): close fingers and report contacts/held-object evidence.
+- wait_until_settled(): let physics settle and return world state.
+- observe(): return current structured world state.
+- approach_object(object_name, clearance): generic above-object approach.
+- grasp_object(object_name, grasp_axis): generic approach-descend-close-lift-verify skill.
+- place_object_at_pose(x, y, z, rotz): generic placement of the currently held object.
+- done(reason): request completion; it can be rejected if observed predicates do not satisfy the task.
+
+Do not rely on task-specific shortcuts. Reason from object names, dimensions, poses, contacts, and predicates.
+When possible, write a short expected effect in content before a tool call.
+"""
+
+
+def _tool_calls_to_dict(tool_calls: list[Any]) -> list[dict[str, Any]]:
+    calls = []
+    for call in tool_calls:
+        calls.append(
+            {
+                "name": call.function.name,
+                "arguments": call.function.arguments or {},
+            }
         )
+    return calls
+
+
+def _parse_done_result(result: str) -> bool:
+    try:
+        return bool(json.loads(result).get("accepted", False))
+    except json.JSONDecodeError:
+        return False
+
+
+def run_llm_task(
+    controller: SimulationController,
+    user_task: str,
+    max_steps: int = MAX_STEPS,
+    print_trace: bool = True,
+) -> dict[str, Any]:
+    global active_controller, active_user_task
+    active_controller = controller
+    active_user_task = user_task
+
+    messages: list[Any] = [
+        {"role": "system", "content": SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                f"Task: {user_task}\n"
+                f"Initial structured world state:\n{controller.observe()}\n"
+                f"{FINAL_INSTRUCTION_LINE}"
+            ),
+        },
+    ]
+    transcript: list[dict[str, Any]] = []
+    completed = False
+
+    for step in range(max_steps):
+        response = None
+        last_model_error = None
+        for attempt in range(MODEL_RETRY_LIMIT):
+            try:
+                response = ollama.chat(
+                    model=MODEL,
+                    messages=messages,
+                    tools=TOOLS,
+                    options={"temperature": 0.0},
+                    keep_alive="30m",
+                )
+                break
+            except Exception as exc:
+                last_model_error = exc
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "The previous model response failed before any tool could be executed: "
+                            f"{exc}. Retry with exactly one valid tool call. Tool arguments must be "
+                            "well-formed JSON with no trailing quote, comma, or extra text."
+                        ),
+                    }
+                )
+
+        if response is None:
+            transcript.append(
+                {
+                    "step": step,
+                    "model_error": repr(last_model_error),
+                    "retry_limit": MODEL_RETRY_LIMIT,
+                }
+            )
+            break
 
         content = (getattr(response.message, "content", "") or "").strip()
+        thinking = getattr(response.message, "thinking", None)
         tool_calls = getattr(response.message, "tool_calls", None) or []
+        call_dicts = _tool_calls_to_dict(tool_calls)
 
-        print("Thinking:", getattr(response.message, "thinking", None))
-        print("Content :", repr(content))
-        print("Tool calls:", tool_calls, "\n")
+        if print_trace:
+            print("Thinking:", thinking)
+            print("Content :", repr(content))
+            print("Tool calls:", tool_calls, "\n")
+
+        transcript.append(
+            {
+                "step": step,
+                "thinking": thinking,
+                "content": content,
+                "tool_calls": call_dicts,
+            }
+        )
 
         messages.append(response.message)
 
-        # If model does not call tools but does provide content, remind of tool use and force retry. It often details the plan but doesn't call tools. 
         if not tool_calls:
-            messages.append({
-                "role": "system",
-                "content": (
-                    "Invalid response. You must call tools to control the robot and complete the task. If the task is complete, call done()."
-                )
-            })
-            messages.append({
-                "role": "user",
-                "content": (
-                    f"Task: {user_task}\n"
-                    f"State: {describe_state()}\n"
-                    f"Env: {describe_env()}\n"
-                    "Retry the best next move using the tools now.\n"
-                )
-            })
+            reminder = (
+                "Invalid response. You must call one generic tool. "
+                "If the task is complete, call done(reason)."
+            )
+            messages.append({"role": "system", "content": reminder})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"Task: {user_task}\n"
+                        f"Latest structured world state:\n{controller.observe()}\n"
+                        "Retry with one generic tool call now."
+                    ),
+                }
+            )
             continue
 
         stop_chain = False
-
         for call in tool_calls:
             fn_name = call.function.name
             fn_args = call.function.arguments or {}
-            fn = available_functions.get(fn_name)
+            fn = AVAILABLE_FUNCTIONS.get(fn_name)
 
             if fn is None:
-                messages.append({
-                    "role": "tool",
+                result = f"ERROR: unknown tool {fn_name}"
+            else:
+                try:
+                    result = fn(**fn_args)
+                except Exception as exc:
+                    result = f"ERROR executing {fn_name}({fn_args}): {exc}"
+
+            if print_trace:
+                print("Tool result:", result, "\n")
+
+            transcript.append(
+                {
+                    "step": step,
                     "tool_name": fn_name,
-                    "content": f"ERROR: unknown tool {fn_name}",
-                })
-                continue
-            
+                    "tool_args": fn_args,
+                    "tool_result": result,
+                }
+            )
+            messages.append({"role": "tool", "tool_name": fn_name, "content": str(result)})
+
             if fn_name == "done":
-                stop_chain = True
-                messages.append({
-                "role": "tool",
-                "tool_name": "done",
-                "content": "ok",
-                })
+                stop_chain = _parse_done_result(str(result))
+                completed = stop_chain
+                if not stop_chain:
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": "done() was rejected by the predicate checker. Continue from the latest observed state.",
+                        }
+                    )
                 break
-
-            try:
-                result = fn(**fn_args)
-            except Exception as e:
-                result = f"ERROR executing {fn_name}({fn_args}): {e}"
-
-            messages.append({
-                "role": "tool",
-                "tool_name": fn_name,
-                "content": str(result),
-            })
 
         if stop_chain:
             break
 
-        messages.append({
-        "role": "user",
-        "content": "Updated observations:\n"
-                f"State: {describe_state()}\n"
-                f"Env: {describe_env()}\n"
-                f"Task: {user_task}\n"
-                f"{final_instruction_line}"
-        })
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"Updated structured world state:\n{controller.observe()}\n"
+                    f"Task: {user_task}\n"
+                    f"{FINAL_INSTRUCTION_LINE}"
+                ),
+            }
+        )
+
+    return {
+        "task": user_task,
+        "completed": completed,
+        "steps": len([item for item in transcript if "tool_calls" in item]),
+        "final_state": controller.observe(),
+        "transcript": transcript,
+    }
 
 
-# Notes from class:
+def main() -> None:
+    controller = SimulationController(gui=True, sleep=True)
+    try:
+        while True:
+            now = datetime.now()
+            print(f"\n=== {now} ===")
+            user_task = input("Enter your task for the robot (or 'exit' to exit): ")
+            if user_task.lower() == "exit":
+                break
+            result = run_llm_task(controller, user_task, print_trace=True)
+            if not result["completed"]:
+                print(f"Task stopped after {MAX_STEPS} steps without accepted completion.")
+    finally:
+        controller.close()
 
-# Control robot with LLM commands via Ollama
-# Ignore joints 8 and 9
-# Joints 10 and 11 are the gripper fingers
-# Revolute = radians and prismatic = meters
-# We're using this Panda robot this year
 
-# My notes:
-
-# TODO I should switch the command to be an "original command" so that the model knows I issued it at first rather than after the 10th command. This will likely help it from not restarting the task when it has
-# accomplished it. Also, add reasoning to "examine if further actions are required. does the current state accomplish the user's command? if so, your job is done so call done()." 
-# Also, add some extra reasoning for unintended collisions. I could instruct to lift to certain height but if I add more cubes / other objects, it will need to be dynamic.
-
-# TODO likely include description of env / size / what the model needs to internpret the state, directly with the state. Otherwise, might forget since way at beginning.
-# TODO look at messages thread and see if the prompt location / subsequent makes sense or if it's causing the model to think it's a new task, causing the interference / start over.
+if __name__ == "__main__":
+    main()
